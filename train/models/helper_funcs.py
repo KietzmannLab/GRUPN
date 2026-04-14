@@ -42,9 +42,17 @@ def get_network_model(hyp):
 
         from .GPN import lstm_gpn
 
-        net = lstm_gpn(timestep_multiplier=timestep_multiplier,glimpse_loss=glimpse_loss,semantic_loss=semantic_loss,scene_loss=scene_loss,gazeloc_loss=gazeloc_loss,n_rnn=n_rnn,regularisation=regularisation,input_dropout=input_dropout,rnn_dropout=rnn_dropout,return_all_actvs=analysis_mode, input_split=input_split, recurrence=recurrence, input_feats=768 if bbv == 5 else 2048) 
+        net = lstm_gpn(timestep_multiplier=timestep_multiplier,glimpse_loss=glimpse_loss,semantic_loss=semantic_loss,scene_loss=scene_loss,gazeloc_loss=gazeloc_loss,n_rnn=n_rnn,regularisation=regularisation,input_dropout=input_dropout,rnn_dropout=rnn_dropout,return_all_actvs=analysis_mode, input_split=input_split, recurrence=recurrence, input_feats=768 if bbv == 5 else 2048)
 
         net_name = f'gpn_lstm_n_{n_rnn}_tm_{timestep_multiplier}_t_{timesteps}_recurrence_{recurrence}_loc_{provide_loc}_bbv{bbv}_gaze_{gaze_type}_indp_{input_dropout}_rnndp_{rnn_dropout}_gcpc_{glimpse_loss}_semc_{semantic_loss}_scc_{scene_loss}_locmse_{gazeloc_loss}_insplit_{input_split}_reg_{regularisation}_tr_{trainer}_gdva_{dva_dataset}_lr_{lr}_num_{network_id}'
+
+    elif hyp['network']['model'] == 'gru':
+
+        from .GPN import gru_gpn
+
+        net = gru_gpn(timestep_multiplier=timestep_multiplier,glimpse_loss=glimpse_loss,semantic_loss=semantic_loss,scene_loss=scene_loss,gazeloc_loss=gazeloc_loss,n_rnn=n_rnn,regularisation=regularisation,input_dropout=input_dropout,rnn_dropout=rnn_dropout,return_all_actvs=analysis_mode, input_split=input_split, recurrence=recurrence, input_feats=768 if bbv == 5 else 2048)
+
+        net_name = f'gpn_gru_n_{n_rnn}_tm_{timestep_multiplier}_t_{timesteps}_recurrence_{recurrence}_loc_{provide_loc}_bbv{bbv}_gaze_{gaze_type}_indp_{input_dropout}_rnndp_{rnn_dropout}_gcpc_{glimpse_loss}_semc_{semantic_loss}_scc_{scene_loss}_locmse_{gazeloc_loss}_insplit_{input_split}_reg_{regularisation}_tr_{trainer}_gdva_{dva_dataset}_lr_{lr}_num_{network_id}'
 
     print(f'\nNetwork name: {net_name}')
 

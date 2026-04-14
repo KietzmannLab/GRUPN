@@ -8,7 +8,7 @@ parser.add_argument('--gaze_type', type=str, default='dg3') # dg3/random/dg3p/dg
 parser.add_argument('--recurrence', type=int, default=1) # 0 if no recurrence, 1 if recurrence
 parser.add_argument('--provide_loc', type=int, default=0) # 1 if saccade is input, 0 if not
 
-parser.add_argument('--network_type', type=str, default='lstm') # lstm
+parser.add_argument('--network_type', type=str, default='lstm', choices=['lstm', 'gru']) # lstm or gru
 parser.add_argument('--timesteps', type=int, default=6) # how many gazes to be provided as input to lstm
 parser.add_argument('--timestep_multiplier', type=int, default=3) # how many rnn layers
 parser.add_argument('--n_rnn', type=int, default=1024) # number of neurons in each rnn layer
@@ -31,6 +31,9 @@ parser.add_argument('--mix_pres', type=int, default=0)
 parser.add_argument('--in_memory', type=int, default=1)
 
 parser.add_argument('--save_nets', type=int, default=1) # save networks
+parser.add_argument('--wandb', type=int, default=0) # 1 to enable Weights & Biases logging
+parser.add_argument('--wandb_project', type=str, default='grupn') # W&B project name
+parser.add_argument('--wandb_entity', type=str, default=None) # W&B entity (team/user)
 
 parser.add_argument('--bbv', type=int, default=6) # 0 is RN50-init, 1/2 is RN50-IN trained, 3 is RN50-Barlowtwins, 4 is RN50-DVD-B, 5 is DINOv2B, 6 is RN50-simclr
 
@@ -40,6 +43,9 @@ import torch
 import numpy as np
 import time
 import random
+
+if args.wandb:
+    import wandb
 
 from helpers.helper_funcs import get_Dataset_loaders, create_folders_logging, create_cpc_matrix, LinearFitScheduler
 from models.helper_funcs import get_network_model, weights_init, get_optimizer, compute_losses
@@ -131,6 +137,35 @@ if __name__ == '__main__':
     net = net.float()
     net.to(hyp['optimizer']['device'])
     print('Network is ready!\n')
+
+    if args.wandb:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=net_name,
+            config={
+                'network_type': args.network_type,
+                'network_id': args.network_id,
+                'n_rnn': args.n_rnn,
+                'timestep_multiplier': args.timestep_multiplier,
+                'timesteps': args.timesteps,
+                'recurrence': args.recurrence,
+                'provide_loc': args.provide_loc,
+                'input_split': args.input_split,
+                'input_dropout': args.input_dropout,
+                'rnn_dropout': args.rnn_dropout,
+                'regularisation': args.regularisation,
+                'glimpse_loss': args.glimpse_loss,
+                'semantic_loss': args.semantic_loss,
+                'scene_loss': args.scene_loss,
+                'gazeloc_loss': args.gazeloc_loss,
+                'batch_size': args.batch_size,
+                'learning_rate': args.learning_rate,
+                'bbv': args.bbv,
+                'dva_dataset': args.dva_dataset,
+                'trainer': args.trainer,
+            }
+        )
 
     # criterion and optimizer setup
     optimizer = get_optimizer(hyp,net) # optimizers for the entire network or the 4 modules - glimpse, semantic, scene, gazeloc
@@ -258,6 +293,18 @@ if __name__ == '__main__':
             print(f'Train contrastive loss floor: {train_contrastive_loss_floor:.3f}')
             print(f'Val contrastive loss floor: {val_contrastive_loss_floor:.3f}\n')
 
+        if args.wandb:
+            log_dict = {
+                'epoch': epoch,
+                'train_loss': train_losses[-1],
+                'val_loss': val_losses[-1],
+                'lr': optimizer.param_groups[0]['lr'],
+            }
+            if compute_contrastive_floor:
+                log_dict['train_contrastive_floor'] = train_contrastive_loss_floor
+                log_dict['val_contrastive_floor'] = val_contrastive_loss_floor
+            wandb.log(log_dict)
+
         if (epoch) < warmup_epochs: # updating for next epoch's use!
             warmup_scheduler.step()
         elif hyp['optimizer']['n_epochs'] == -1:
@@ -300,8 +347,11 @@ if __name__ == '__main__':
 
     print('\n Done training!\n')
 
-    # 
     if args.save_nets:
         print('Min val loss:',min(val_losses))
     else:
         print('Min val loss:',min(val_losses))
+
+    if args.wandb:
+        wandb.summary['min_val_loss'] = min(val_losses)
+        wandb.finish()

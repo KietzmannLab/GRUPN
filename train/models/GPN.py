@@ -408,5 +408,287 @@ class NonRecurrentLSTM(nn.Module):
         if self.batch_first:
             output = output.transpose(0, 1)
         return output, (h_n_all, c_n_all)
-    
+
 # to-do: transformer_gpn
+
+
+###########################################
+# GRU-based GPN                           #
+###########################################
+
+class gru_gpn(nn.Module):
+    """
+    GRU-based Glimpse Prediction Network.
+
+    Drop-in replacement for lstm_gpn using nn.GRU instead of nn.LSTM.
+    GRU has no cell state: only hidden state h_t is carried forward.
+
+    Gate activations (for analysis):
+        r_t = sigmoid(W_ir·x + b_ir + W_hr·h_{t-1} + b_hr)   # reset
+        z_t = sigmoid(W_iz·x + b_iz + W_hz·h_{t-1} + b_hz)   # update
+        n_t = tanh(W_in·x + b_in + r_t ⊙ (W_hn·h_{t-1} + b_hn))  # candidate
+        h_t = (1 − z_t) ⊙ n_t + z_t ⊙ h_{t-1}
+
+    When return_all_actvs=1, activations dict contains:
+        gru_h_{layer}  for layer in 0 .. timestep_multiplier-2  (intermediate layers)
+        gru_out        output of the final layer (after LayerNorm)
+    """
+
+    def __init__(self, timestep_multiplier=3, glimpse_loss=1, semantic_loss=0,
+                 scene_loss=0, gazeloc_loss=0, n_rnn=256, regularisation=1,
+                 input_dropout=0.25, rnn_dropout=0.1, return_all_actvs=0,
+                 input_split=0, recurrence=True, input_feats=2048):
+
+        super(gru_gpn, self).__init__()
+
+        self.actv_dropout = nn.Dropout(input_dropout) if regularisation else nn.Identity()
+        self.actv_proj = nn.Linear(input_feats, int(n_rnn / 2))
+        self.actv_proj_norm = nn.LayerNorm(int(n_rnn / 2)) if regularisation else nn.Identity()
+        self.coord_proj = nn.Linear(2, int(n_rnn / 2))
+        self.coord_proj_norm = nn.LayerNorm(int(n_rnn / 2)) if regularisation else nn.Identity()
+        self.return_all_actvs = return_all_actvs
+        self.input_split = input_split
+        self.recurrence = recurrence
+
+        self.timestep_multiplier = timestep_multiplier
+        if self.recurrence:
+            self.gru = nn.GRU(n_rnn, n_rnn, self.timestep_multiplier,
+                              dropout=rnn_dropout if regularisation else 0,
+                              batch_first=True)
+        else:
+            self.gru = NonRecurrentGRU(n_rnn, n_rnn, self.timestep_multiplier,
+                                       dropout=rnn_dropout if regularisation else 0,
+                                       batch_first=True)
+        self.gru_norm = nn.LayerNorm(n_rnn) if regularisation else nn.Identity()
+
+        self.glimpse_loss = glimpse_loss
+        if self.glimpse_loss:
+            self.glimpse_proj_hidden = nn.Linear(n_rnn, int(n_rnn / 3))
+            self.glimpse_proj_hidden_norm = nn.LayerNorm(int(n_rnn / 3)) if regularisation else nn.Identity()
+            self.glimpse_proj = nn.Linear(int(n_rnn / 3), input_feats)
+            self.glimpse_proj_norm = nn.LayerNorm(input_feats) if regularisation else nn.Identity()
+            self.glimpse_module = nn.ModuleList([self.glimpse_proj_hidden, self.glimpse_proj_hidden_norm,
+                                                 self.glimpse_proj, self.glimpse_proj_norm])
+
+        self.semantic_loss = semantic_loss
+        if self.semantic_loss:
+            self.semantic_proj_hidden = nn.Linear(n_rnn, int(n_rnn / 3))
+            self.semantic_proj_hidden_norm = nn.LayerNorm(int(n_rnn / 3)) if regularisation else nn.Identity()
+            self.semantic_proj = nn.Linear(int(n_rnn / 3), 768)
+            self.semantic_proj_norm = nn.LayerNorm(768) if regularisation else nn.Identity()
+            self.semantic_module = nn.ModuleList([self.semantic_proj_hidden, self.semantic_proj_hidden_norm,
+                                                  self.semantic_proj, self.semantic_proj_norm])
+
+        self.scene_loss = scene_loss
+        if self.scene_loss:
+            self.scene_proj_hidden = nn.Linear(n_rnn, int(n_rnn / 3))
+            self.scene_proj_hidden_norm = nn.LayerNorm(int(n_rnn / 3)) if regularisation else nn.Identity()
+            self.scene_proj = nn.Linear(int(n_rnn / 3), 91)
+            self.scene_module = nn.ModuleList([self.scene_proj_hidden, self.scene_proj_hidden_norm,
+                                               self.scene_proj])
+
+        self.gazeloc_loss = gazeloc_loss
+        if self.gazeloc_loss:
+            self.gazeloc_proj_hidden = nn.Linear(n_rnn, int(n_rnn / 3))
+            self.gazeloc_proj_hidden_norm = nn.LayerNorm(int(n_rnn / 3)) if regularisation else nn.Identity()
+            self.gazeloc_proj = nn.Linear(int(n_rnn / 3), 2)
+            self.gazeloc_module = nn.ModuleList([self.gazeloc_proj_hidden, self.gazeloc_proj_hidden_norm,
+                                                 self.gazeloc_proj])
+
+    def forward(self, actvs_seq, coord_seq):
+
+        activations = {}
+
+        activations['rn50_glimpse'] = actvs_seq
+
+        actv_proj = F.relu(self.actv_proj_norm(self.actv_proj(self.actv_dropout(actvs_seq))))
+        if self.input_split == 1:
+            B, T, D = actv_proj.shape
+            new_actvs_proj = torch.zeros(B, T * 2, D, device=actv_proj.device, dtype=actv_proj.dtype)
+            new_actvs_proj[:, ::2, :] = actv_proj
+
+        coord_proj = F.relu(self.coord_proj_norm(self.coord_proj(coord_seq)))
+        if self.input_split == 1:
+            B, T, D = coord_proj.shape
+            new_coord_proj = torch.zeros(B, T * 2, D, device=coord_proj.device, dtype=coord_proj.dtype)
+            new_coord_proj[:, 1::2, :] = coord_proj
+
+        activations['joint_proj'] = (torch.cat((actv_proj, coord_proj), dim=2)
+                                     if self.input_split == 0
+                                     else torch.cat((new_actvs_proj, new_coord_proj), dim=2))
+
+        if self.return_all_actvs:
+            _, seq_len, _ = activations['joint_proj'].size()
+            all_hidden_states = [[] for _ in range(self.timestep_multiplier)]
+            for t in range(seq_len):
+                if t == 0:
+                    _, hn = self.gru(activations['joint_proj'][:, t].unsqueeze(1))
+                else:
+                    _, hn = self.gru(activations['joint_proj'][:, t].unsqueeze(1), hn)
+                for layer in range(self.timestep_multiplier):
+                    all_hidden_states[layer].append(hn[layer].unsqueeze(1))
+            for layer in range(self.timestep_multiplier - 1):
+                activations[f'gru_h_{layer}'] = (
+                    torch.cat(all_hidden_states[layer], dim=1)
+                    if self.input_split == 0
+                    else torch.cat(all_hidden_states[layer][::2], dim=1)
+                )
+            gru_out = torch.cat(all_hidden_states[-1], dim=1)
+        else:
+            gru_out, _ = self.gru(activations['joint_proj'])
+
+        activations['gru_out'] = self.gru_norm(gru_out)
+        activations['joint_proj'] = (activations['joint_proj']
+                                     if self.input_split == 0
+                                     else activations['joint_proj'][:, ::2])
+
+        outputs = [None for _ in range(4)]
+        if self.glimpse_loss:
+            activations['glimpse_hidden'] = F.relu(self.glimpse_proj_hidden_norm(
+                self.glimpse_proj_hidden(activations['gru_out'])))
+            activations['glimpse_output'] = self.glimpse_proj_norm(
+                self.glimpse_proj(activations['glimpse_hidden']))
+            outputs[0] = (activations['glimpse_output']
+                          if self.input_split == 0
+                          else activations['glimpse_output'][:, 1::2])
+            activations['glimpse_hidden'] = (activations['glimpse_hidden']
+                                             if self.input_split == 0
+                                             else activations['glimpse_hidden'][:, 1::2])
+            activations['glimpse_output'] = (activations['glimpse_output']
+                                             if self.input_split == 0
+                                             else activations['glimpse_output'][:, 1::2])
+        if self.semantic_loss:
+            activations['semantic_hidden'] = F.relu(self.semantic_proj_hidden_norm(
+                self.semantic_proj_hidden(activations['gru_out'])))
+            activations['semantic_output'] = self.semantic_proj_norm(
+                self.semantic_proj(activations['semantic_hidden']))
+            outputs[1] = (activations['semantic_output']
+                          if self.input_split == 0
+                          else activations['semantic_output'][:, 1::2])
+            activations['semantic_hidden'] = (activations['semantic_hidden']
+                                              if self.input_split == 0
+                                              else activations['semantic_hidden'][:, 1::2])
+            activations['semantic_output'] = (activations['semantic_output']
+                                              if self.input_split == 0
+                                              else activations['semantic_output'][:, 1::2])
+        if self.scene_loss:
+            activations['scene_hidden'] = F.relu(self.scene_proj_hidden_norm(
+                self.scene_proj_hidden(activations['gru_out'])))
+            activations['scene_output'] = self.scene_proj(activations['scene_hidden'])
+            outputs[2] = (activations['scene_output']
+                          if self.input_split == 0
+                          else activations['scene_output'][:, 1::2])
+            activations['scene_hidden'] = (activations['scene_hidden']
+                                           if self.input_split == 0
+                                           else activations['scene_hidden'][:, 1::2])
+            activations['scene_output'] = (activations['scene_output']
+                                           if self.input_split == 0
+                                           else activations['scene_output'][:, 1::2])
+        if self.gazeloc_loss:
+            activations['gazeloc_hidden'] = F.relu(self.gazeloc_proj_hidden_norm(
+                self.gazeloc_proj_hidden(activations['gru_out'])))
+            activations['gazeloc_output'] = self.gazeloc_proj(activations['gazeloc_hidden'])
+            outputs[3] = (activations['gazeloc_output']
+                          if self.input_split == 0
+                          else activations['gazeloc_output'][:, 1::2])
+            activations['gazeloc_hidden'] = (activations['gazeloc_hidden']
+                                             if self.input_split == 0
+                                             else activations['gazeloc_hidden'][:, 1::2])
+            activations['gazeloc_output'] = (activations['gazeloc_output']
+                                             if self.input_split == 0
+                                             else activations['gazeloc_output'][:, 1::2])
+
+        # keep only the saccade stream when input_split=1
+        activations['gru_out'] = (activations['gru_out']
+                                  if self.input_split == 0
+                                  else activations['gru_out'][:, 1::2])
+
+        if self.return_all_actvs:
+            return activations, outputs
+        else:
+            return outputs
+
+
+###########################################
+# Non-Recurrent GRU Wrapper Classes       #
+###########################################
+
+class NonRecurrentGRUCell(nn.Module):
+    """
+    Non-recurrent GRU cell — computes activations solely from the current input.
+
+    Standard GRU update:
+        r_t = sigmoid(W_r · x_t + b_r_x + W_r_h · h_{t-1} + b_r_h)
+        z_t = sigmoid(W_z · x_t + b_z_x + W_z_h · h_{t-1} + b_z_h)
+        n_t = tanh(W_n · x_t + b_n_x + r_t ⊙ (W_n_h · h_{t-1} + b_n_h))
+        h_t = (1 − z_t) ⊙ n_t + z_t ⊙ h_{t-1}
+
+    Non-recurrent version: h_{t-1} is ignored, so:
+        r_t = sigmoid(W_r · x_t)   (no effect on n_t without h_{t-1})
+        z_t = sigmoid(W_z · x_t)
+        n_t = tanh(W_n · x_t)
+        h_t = (1 − z_t) ⊙ n_t
+    """
+
+    def __init__(self, input_size, hidden_size, bias=True):
+        super(NonRecurrentGRUCell, self).__init__()
+        self.hidden_size = hidden_size
+        self.linear = nn.Linear(input_size, 3 * hidden_size, bias=bias)
+
+    def forward(self, x, hx=None):
+        gates = self.linear(x)  # (batch, 3*hidden_size)
+        r, z, n = gates.chunk(3, dim=-1)
+        r = torch.sigmoid(r)
+        z = torch.sigmoid(z)
+        n = torch.tanh(n)
+        h = (1 - z) * n
+        return h
+
+
+class NonRecurrentGRU(nn.Module):
+    """
+    Wrapper that mimics the nn.GRU API but removes all recurrence.
+    Each timestep is processed independently with no hidden state carryover.
+
+    Returns (output, h_n) to be drop-in compatible with nn.GRU.
+    """
+
+    def __init__(self, input_size, hidden_size, num_layers=1, bias=True,
+                 batch_first=False, dropout=0.0, bidirectional=False):
+        super(NonRecurrentGRU, self).__init__()
+        self.batch_first = batch_first
+        self.num_layers = num_layers
+        self.hidden_size = hidden_size
+
+        self.layers = nn.ModuleList()
+        for layer in range(num_layers):
+            layer_input_size = input_size if layer == 0 else hidden_size
+            self.layers.append(NonRecurrentGRUCell(layer_input_size, hidden_size, bias))
+
+        self.dropout_layer = nn.Dropout(dropout) if dropout > 0.0 else None
+
+    def forward(self, x, hx=None):
+        if self.batch_first:
+            x = x.transpose(0, 1)  # (seq_len, batch, input_size)
+        seq_len, batch_size, _ = x.size()
+
+        layer_h_n = []
+        output = x
+
+        for layer_idx, cell in enumerate(self.layers):
+            outputs = []
+            h_t_last = None
+            for t in range(seq_len):
+                h_t = cell(output[t])
+                outputs.append(h_t.unsqueeze(0))
+                h_t_last = h_t
+            layer_output = torch.cat(outputs, dim=0)  # (seq_len, batch, hidden_size)
+            if self.dropout_layer is not None and layer_idx < self.num_layers - 1:
+                layer_output = self.dropout_layer(layer_output)
+            output = layer_output
+            layer_h_n.append(h_t_last.unsqueeze(0))
+
+        h_n_all = torch.cat(layer_h_n, dim=0)  # (num_layers, batch, hidden_size)
+        if self.batch_first:
+            output = output.transpose(0, 1)
+        return output, h_n_all
