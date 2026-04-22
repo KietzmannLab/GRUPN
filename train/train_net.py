@@ -25,13 +25,13 @@ parser.add_argument('--trainer', type=str, default='train_515') # train/train_51
 parser.add_argument('--n_epochs', type=int, default=-1) # -1 if end on convergence, >0 if #epochs desired
 parser.add_argument('--dva_dataset', type=str, default='NSD') # NSD
 parser.add_argument('--batch_size', type=int, default=512)
-parser.add_argument('--learning_rate', type=float, default=1e-4)
+parser.add_argument('--learning_rate', type=float, default=1e-4) #1e-4
 parser.add_argument('--show_progress_bar', type=int, default=0)
 parser.add_argument('--mix_pres', type=int, default=0)
 parser.add_argument('--in_memory', type=int, default=1)
 
 parser.add_argument('--save_nets', type=int, default=1) # save networks
-parser.add_argument('--wandb', type=int, default=0) # 1 to enable Weights & Biases logging
+parser.add_argument('--wandb', type=int, default=1) # 1 to enable Weights & Biases logging
 parser.add_argument('--wandb_project', type=str, default='grupn') # W&B project name
 parser.add_argument('--wandb_entity', type=str, default=None) # W&B entity (team/user)
 
