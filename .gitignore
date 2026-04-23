@@ -1,0 +1,28 @@
+# make a decent gitignore file for this project
+# ignore all .pyc files
+*.pyc
+# ignore all __pycache__ directories
+__pycache__/
+# ignore all .ipynb_checkpoints directories
+.ipynb_checkpoints/
+# ignore all .env directories
+.env/
+# ignore all .venv directories
+.venv/
+# ignore all .idea directories
+.idea/
+# ignore all .vscode directories
+.vscode/
+# ignore all .DS_Store files
+.DS_Store
+# ignore all .ipynb files
+*.ipynb
+# ignore all .log files
+*.log
+*.out
+
+*.err
+
+*.pth
+*wandb*
+*npz
