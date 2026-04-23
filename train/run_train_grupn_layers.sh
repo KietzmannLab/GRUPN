@@ -38,8 +38,8 @@ python train_net.py \
     --gaze_type dg3 \
     --input_dropout 0.25 \
     --rnn_dropout 0.1 \
-    --glimpse_loss 1 \
-    --semantic_loss 0 \
+    --glimpse_loss 0 \
+    --semantic_loss 1 \
     --scene_loss 0 \
     --gazeloc_loss 0 \
     --input_split 0 \
