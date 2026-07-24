@@ -33,7 +33,7 @@ python train_net.py \
     --n_rnn 1024 \
     --timesteps 6 \
     --recurrence 1 \
-    --provide_loc 0 \
+    --provide_loc 1 \
     --bbv 6 \
     --gaze_type dg3 \
     --input_dropout 0.25 \
