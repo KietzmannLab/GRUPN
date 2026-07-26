@@ -2,9 +2,9 @@
 #SBATCH --job-name=grupn_train
 #SBATCH --output=grupn_train_tm%a_%A.out
 #SBATCH --error=grupn_train_tm%a_%A.err
-#SBATCH --array=1-2
-#SBATCH --time=48:00:00
-#SBATCH --mem=64GB
+#SBATCH --array=1-4
+#SBATCH --time=12:00:00
+#SBATCH --mem=400GB
 #SBATCH --cpus-per-task=8
 #SBATCH --partition=klab-gpu
 #SBATCH --gres=gpu:1
@@ -33,7 +33,7 @@ python train_net.py \
     --n_rnn 1024 \
     --timesteps 6 \
     --recurrence 1 \
-    --provide_loc 0 \
+    --provide_loc 1 \
     --bbv 6 \
     --gaze_type dg3 \
     --input_dropout 0.25 \
