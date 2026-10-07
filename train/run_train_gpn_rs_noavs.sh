@@ -37,6 +37,12 @@ spack load cudnn@8.6.0.163-11.8
 spack load miniconda3
 conda activate lightning
 
+# node-local /tmp is small and shared across every job on the node; the probe's per-epoch
+# wandb.Image() PNG save hit it directly (job 12917643: OSError, No space left on device,
+# after epoch 1 completed cleanly). Redirect temp files to shared scratch instead.
+export TMPDIR=/share/klab/psulewski/psulewski/pyavs/tmp
+mkdir -p "${TMPDIR}"
+
 TM=${SLURM_ARRAY_TASK_ID}
 PACK=/share/klab/psulewski/psulewski/memdur_paper/data/behav/gpn_features/avs_probe_pack_v1.h5
 HELDOUT=/share/klab/psulewski/psulewski/memdur_paper/data/gpn_heldout
