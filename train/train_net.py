@@ -22,6 +22,8 @@ parser.add_argument('--scene_loss', type=int, default=0) # 0 if not required, 1 
 parser.add_argument('--gazeloc_loss', type=int, default=0) # 0 if not required, 1 if yes - MSE
 
 parser.add_argument('--trainer', type=str, default='train_515') # train/train_515
+parser.add_argument('--exclude_avs', type=int, default=0) # 1 to hold every AVS-MEG stimulus scene out of training AND validation (leakage control; appends _noavs to the trainer name)
+parser.add_argument('--heldout_dir', type=str, default=None) # dir with exclude_{split}.npy from helpers/scene_overlap.py
 parser.add_argument('--n_epochs', type=int, default=-1) # -1 if end on convergence, >0 if #epochs desired
 parser.add_argument('--dva_dataset', type=str, default='NSD') # NSD
 parser.add_argument('--batch_size', type=int, default=512)
@@ -35,6 +37,16 @@ parser.add_argument('--wandb', type=int, default=1) # 1 to enable Weights & Bias
 parser.add_argument('--wandb_project', type=str, default='grupn') # W&B project name
 parser.add_argument('--wandb_entity', type=str, default=None) # W&B entity (team/user)
 
+# AVS fixation-duration probe — a DIAGNOSTIC ONLY. It never informs checkpoint selection,
+# early stopping or hyperparameters; selection stays on the validation loss.
+parser.add_argument('--probe', type=int, default=0) # 1 to log gate->duration betas each epoch
+parser.add_argument('--probe_pack', type=str, default=None) # avs_probe_pack_v1.h5 (build_avs_probe_pack.py)
+parser.add_argument('--probe_every', type=int, default=1) # run the probe every N epochs
+parser.add_argument('--probe_stats', type=str, default='meta', choices=['meta', 'mixedlm'])
+parser.add_argument('--probe_layers', type=str, default='0') # comma-separated RNN layers
+parser.add_argument('--probe_memgate_dir', type=str, default='/home/student/p/psulewski/avs-gazetime/avs_gazetime/memgate')
+parser.add_argument('--probe_saccade_units', type=str, default='train_units', choices=['train_units', 'legacy']) # must match the units this network is trained on
+
 parser.add_argument('--bbv', type=int, default=6) # 0 is RN50-init, 1/2 is RN50-IN trained, 3 is RN50-Barlowtwins, 4 is RN50-DVD-B, 5 is DINOv2B, 6 is RN50-simclr
 
 args = parser.parse_args()
@@ -47,8 +59,12 @@ import random
 if args.wandb:
     import wandb
 
-from helpers.helper_funcs import get_Dataset_loaders, create_folders_logging, create_cpc_matrix, LinearFitScheduler
+from helpers.helper_funcs import get_Dataset_loaders, create_folders_logging, create_cpc_matrix, LinearFitScheduler, HELDOUT_DIR
 from models.helper_funcs import get_network_model, weights_init, get_optimizer, compute_losses
+
+# the trainer name carries the AVS exclusion, so net_name/checkpoints separate automatically
+trainer_split = args.trainer + ('_noavs' if args.exclude_avs else '')
+val_split = 'val_noavs' if args.exclude_avs else 'val'
 
 ##################
 ## Hyperparameters
@@ -70,6 +86,7 @@ hyp = {
         'in_memory': args.in_memory, # should we load the entire dataset in memory?
         'bbv': args.bbv, # which backbone version to use
         'dva_dataset': args.dva_dataset, # extent of glimpse decided given NSD/AVS parameters
+        'heldout_dir': args.heldout_dir or HELDOUT_DIR, # AVS held-out index files
     },
     'network': {
         'model': args.network_type, # model to be used
@@ -90,7 +107,7 @@ hyp = {
         'lr': args.learning_rate, # learning rate - scheduler takes care of this!
         'batch_size': args.batch_size,
         'n_epochs': args.n_epochs, # number of epochs (full cycle through the dataset)
-        'trainer': args.trainer, # train/train_1000/train_515
+        'trainer': trainer_split, # train/train_515/train_515_noavs
         'device': 'cuda', # device to train the network on: 'cuda', 'mps', 'cpu'
         'dataloader': { # request 10 cores at least
             'num_workers_train': 6, # number of cpu workers processing the batches 
@@ -123,12 +140,12 @@ np.random.seed(hyp['network']['identifier'])
 if __name__ == '__main__':
 
     # load the dataset loaders to iterate over for training and eval (CS MAGIC)
-    print(f'Loading data and preparing dataloaders for {args.trainer} and validation...')
+    print(f'Loading data and preparing dataloaders for {trainer_split} and {val_split}...')
     if args.in_memory == 1:
         print('Loading datasets in memory!')
-    train_loader = get_Dataset_loaders(hyp, args.trainer)
-    val_loader = get_Dataset_loaders(hyp, 'val')
-    print(f'{args.trainer} and validation dataloaders are ready!\n')
+    train_loader = get_Dataset_loaders(hyp, trainer_split)
+    val_loader = get_Dataset_loaders(hyp, val_split)
+    print(f'{trainer_split} and {val_split} dataloaders are ready!\n')
 
     # create the network and initialize it
     print('Loading network...')
@@ -137,6 +154,22 @@ if __name__ == '__main__':
     net = net.float()
     net.to(hyp['optimizer']['device'])
     print('Network is ready!\n')
+
+    # AVS fixation-duration probe (diagnostic; see probes/avs_duration_probe.py)
+    probe = None
+    if args.probe:
+        if not args.probe_pack:
+            raise ValueError('--probe 1 requires --probe_pack')
+        from probes.avs_duration_probe import AVSDurationProbe
+        probe = AVSDurationProbe(
+            pack_path=args.probe_pack,
+            layers=tuple(int(l) for l in args.probe_layers.split(',')),
+            provide_loc=args.provide_loc,   # must match training, or the saccade branch is OOD
+            device=hyp['optimizer']['device'],
+            stats=args.probe_stats,
+            memgate_dir=args.probe_memgate_dir,
+            saccade_units=args.probe_saccade_units,
+        )
 
     if args.wandb:
         wandb.init(
@@ -163,7 +196,9 @@ if __name__ == '__main__':
                 'learning_rate': args.learning_rate,
                 'bbv': args.bbv,
                 'dva_dataset': args.dva_dataset,
-                'trainer': args.trainer,
+                'trainer': trainer_split,
+                'exclude_avs': args.exclude_avs,
+                'probe': args.probe,
             }
         )
 
@@ -285,6 +320,21 @@ if __name__ == '__main__':
         if compute_contrastive_floor:
             val_contrastive_loss_floor = val_contrastive_loss_floor_running/len(val_loader)
 
+        # AVS duration probe — diagnostic only, and wrapped so a probe failure can never
+        # take down a multi-day training run
+        probe_scalars, probe_fig = {}, None
+        if probe is not None and epoch % args.probe_every == 0:
+            try:
+                probe_scalars, probe_fig = probe(net, epoch)
+                betas = ', '.join(
+                    f"{k.split('/')[-1]}={probe_scalars[k]:+.3f}"
+                    for k in sorted(probe_scalars) if k.startswith('probe/beta/'))
+                print(f'Probe betas ({probe_scalars.get("probe/n_fix", 0)} fixations, '
+                      f'{probe_scalars.get("probe/wall_s", 0):.1f}s): {betas}\n')
+            except Exception as e:
+                print(f'[probe] FAILED at epoch {epoch}: {e}\n')
+                probe_scalars, probe_fig = {'probe/failed': 1}, None
+
         print('Epoch time: ', "{:.2f}".format(time.time() - start), ' seconds\n')
         
         print(f'Train loss: {train_losses[-1]:.3f}')
@@ -303,7 +353,14 @@ if __name__ == '__main__':
             if compute_contrastive_floor:
                 log_dict['train_contrastive_floor'] = train_contrastive_loss_floor
                 log_dict['val_contrastive_floor'] = val_contrastive_loss_floor
+            log_dict.update(probe_scalars)
+            if probe_fig is not None:
+                log_dict['probe/fig/betas'] = wandb.Image(probe_fig)
             wandb.log(log_dict)
+
+        if probe_fig is not None:
+            import matplotlib.pyplot as plt
+            plt.close(probe_fig)
 
         if (epoch) < warmup_epochs: # updating for next epoch's use!
             warmup_scheduler.step()
