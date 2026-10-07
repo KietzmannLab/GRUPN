@@ -4,7 +4,7 @@
 #SBATCH --error=gpn_rs_noavs_tm%a_%A.err
 #SBATCH --array=1
 #SBATCH --time=48:00:00
-#SBATCH --mem=160GB
+#SBATCH --mem=400GB
 #SBATCH --cpus-per-task=10
 #SBATCH --partition=klab-gpu
 #SBATCH --gres=gpu:1
@@ -25,7 +25,10 @@
 #   sbatch ../../avs-gazetime/avs_gazetime/memgate/run_build_avs_probe_pack.sh
 #
 # --mem: the in-memory train_515_noavs glimpse tensor is ~67 GB in float32, plus a ~20 GB
-# read buffer while the test segment is loaded. Drop to --in_memory 0 if memory is tight.
+# read buffer while the test segment is loaded. Raised 160GB -> 400GB (matching
+# run_train_gpn_rs_layers.sh) after the first attempt (job 12917636) OOM'd allocating the
+# 67 GB tensor outright at 160GB -- sacct reported COMPLETED 0:0 despite the crash (no set -e).
+# Drop to --in_memory 0 if 400GB is still tight.
 
 # Load environment
 source ~/.bashrc
