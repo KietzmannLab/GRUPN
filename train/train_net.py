@@ -17,7 +17,10 @@ parser.add_argument('--input_dropout', type=float, default=0.25)
 parser.add_argument('--rnn_dropout', type=float, default=0.1)
 parser.add_argument('--input_split', type=int, default=0) # 0 if provide image and saccade at the same time, 1 if provide image and saccade separately
 parser.add_argument('--glimpse_loss', type=int, default=1) # 0 if not required, 1 if yes - CPC, 2 if yes - CPC but with no equal split of in-sequences and out-sequence pairs
-parser.add_argument('--semantic_loss', type=int, default=0) # 0 if not required, 1 if yes - contrastive
+parser.add_argument('--semantic_loss', type=int, default=0) # 0 if not required, 1 if yes - contrastive (flat mean-difference, published), 2 if yes - temperature-scaled InfoNCE
+parser.add_argument('--semantic_temp', type=float, default=0.1) # semantic_loss 2 only: softmax temperature. tau -> inf recovers the gradient of variant 1
+parser.add_argument('--semantic_norm', type=str, default='tau', choices=['tau', 'logk', 'none']) # semantic_loss 2 only: loss rescaling (see semantic_infonce)
+parser.add_argument('--semantic_dedup', type=int, default=1) # semantic_loss 2 only: drop same-scene rows from the denominator (identical caption embeddings are false negatives)
 parser.add_argument('--scene_loss', type=int, default=0) # 0 if not required, 1 if yes - BCE with logits (multihot object labels)
 parser.add_argument('--gazeloc_loss', type=int, default=0) # 0 if not required, 1 if yes - MSE
 
@@ -120,6 +123,9 @@ hyp = {
             'scene_loss': args.scene_loss,
             'gazeloc_loss': args.gazeloc_loss,
             'provide_loc': args.provide_loc,
+            'semantic_temp': args.semantic_temp,
+            'semantic_norm': args.semantic_norm,
+            'semantic_dedup': args.semantic_dedup,
         }
     },
     'misc': {
@@ -190,6 +196,9 @@ if __name__ == '__main__':
                 'regularisation': args.regularisation,
                 'glimpse_loss': args.glimpse_loss,
                 'semantic_loss': args.semantic_loss,
+                'semantic_temp': args.semantic_temp,
+                'semantic_norm': args.semantic_norm,
+                'semantic_dedup': args.semantic_dedup,
                 'scene_loss': args.scene_loss,
                 'gazeloc_loss': args.gazeloc_loss,
                 'batch_size': args.batch_size,
@@ -247,11 +256,12 @@ if __name__ == '__main__':
         if compute_contrastive_floor:
             train_contrastive_loss_floor_running = 0.0 
             train_contrastive_loss_floor = 0.0
+        train_diag_running = {} # loss-internal diagnostics (semantic InfoNCE), averaged over batches
         batch = 0
 
         print('LR_main now: ',optimizer.param_groups[0]['lr'])
 
-        for actvs,next_fix_rel_coords,fix_coords,semantic_embed,_,scene_multihot,_,_ in train_loader: 
+        for actvs,next_fix_rel_coords,fix_coords,semantic_embed,_,scene_multihot,img_n,_ in train_loader: 
 
             cpc_mask = create_cpc_matrix(actvs.shape[0]*(actvs.shape[1]-1),actvs.shape[1]-1).to(hyp['optimizer']['device'])
 
@@ -261,6 +271,7 @@ if __name__ == '__main__':
             fix_coords = fix_coords.to(hyp['optimizer']['device'])
             semantic_embed = semantic_embed.to(hyp['optimizer']['device'])
             scene_multihot = scene_multihot.to(hyp['optimizer']['device'])
+            img_n = img_n.to(hyp['optimizer']['device'])
 
             optimizer.zero_grad()
             
@@ -268,7 +279,7 @@ if __name__ == '__main__':
 
                 outputs = net(actvs[:,:-1,:],args.provide_loc*next_fix_rel_coords) # only feed actvs[:,:-1,:] as input as the last fixation isn't used as an input
 
-                loss, contrastive_loss_floor = compute_losses(outputs,actvs,fix_coords,semantic_embed,scene_multihot,cpc_mask,hyp,compute_contrastive_floor)
+                loss, contrastive_loss_floor, diag = compute_losses(outputs,actvs,fix_coords,semantic_embed,scene_multihot,cpc_mask,hyp,compute_contrastive_floor,img_n)
             
             scaler.scale(loss).backward(retain_graph=True)
             scaler.step(optimizer)
@@ -277,6 +288,8 @@ if __name__ == '__main__':
             train_loss_running += loss.item()
             if compute_contrastive_floor:
                 train_contrastive_loss_floor_running += contrastive_loss_floor.item()
+            for k, v in diag.items():
+                train_diag_running[k] = train_diag_running.get(k, 0.0) + v
 
             batch += 1
             if show_progress_bar:
@@ -285,6 +298,7 @@ if __name__ == '__main__':
         train_losses.append(train_loss_running/len(train_loader))
         if compute_contrastive_floor:
             train_contrastive_loss_floor = train_contrastive_loss_floor_running/len(train_loader)
+        train_diag = {f'train_{k}': v/len(train_loader) for k, v in train_diag_running.items()}
         
         # getting validation loss and acc
         net.eval()
@@ -292,8 +306,9 @@ if __name__ == '__main__':
         if compute_contrastive_floor:
             val_contrastive_loss_floor_running = 0.0
             val_contrastive_loss_floor = 0.0
+        val_diag_running = {}
 
-        for actvs,next_fix_rel_coords,fix_coords,semantic_embed,_,scene_multihot,_,_ in val_loader:
+        for actvs,next_fix_rel_coords,fix_coords,semantic_embed,_,scene_multihot,img_n,_ in val_loader:
 
             cpc_mask = create_cpc_matrix(actvs.shape[0]*(actvs.shape[1]-1),actvs.shape[1]-1).to(hyp['optimizer']['device'])
 
@@ -303,22 +318,26 @@ if __name__ == '__main__':
             fix_coords = fix_coords.to(hyp['optimizer']['device'])
             semantic_embed = semantic_embed.to(hyp['optimizer']['device'])
             scene_multihot = scene_multihot.to(hyp['optimizer']['device'])
+            img_n = img_n.to(hyp['optimizer']['device'])
             
             with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=hyp['misc']['use_amp']):
 
                 outputs = net(actvs[:,:-1,:],args.provide_loc*next_fix_rel_coords) # only feed actvs[:,:-1,:] as input as the last fixation isn't used as an input
 
-                loss, contrastive_loss_floor = compute_losses(outputs,actvs,fix_coords,semantic_embed,scene_multihot,cpc_mask,hyp,compute_contrastive_floor)
+                loss, contrastive_loss_floor, diag = compute_losses(outputs,actvs,fix_coords,semantic_embed,scene_multihot,cpc_mask,hyp,compute_contrastive_floor,img_n)
 
             val_loss_running += loss.item()
             if compute_contrastive_floor:
                 val_contrastive_loss_floor_running += contrastive_loss_floor.item()
+            for k, v in diag.items():
+                val_diag_running[k] = val_diag_running.get(k, 0.0) + v
 
         net.train()
 
         val_losses.append(val_loss_running/len(val_loader))
         if compute_contrastive_floor:
             val_contrastive_loss_floor = val_contrastive_loss_floor_running/len(val_loader)
+        val_diag = {f'val_{k}': v/len(val_loader) for k, v in val_diag_running.items()}
 
         # AVS duration probe — diagnostic only, and wrapped so a probe failure can never
         # take down a multi-day training run
@@ -342,6 +361,8 @@ if __name__ == '__main__':
         if compute_contrastive_floor:
             print(f'Train contrastive loss floor: {train_contrastive_loss_floor:.3f}')
             print(f'Val contrastive loss floor: {val_contrastive_loss_floor:.3f}\n')
+        if val_diag:
+            print('Semantic: ' + ', '.join(f'{k}={v:.3f}' for k, v in sorted(val_diag.items())) + '\n')
 
         if args.wandb:
             log_dict = {
@@ -353,6 +374,8 @@ if __name__ == '__main__':
             if compute_contrastive_floor:
                 log_dict['train_contrastive_floor'] = train_contrastive_loss_floor
                 log_dict['val_contrastive_floor'] = val_contrastive_loss_floor
+            log_dict.update(train_diag)
+            log_dict.update(val_diag)
             log_dict.update(probe_scalars)
             if probe_fig is not None:
                 log_dict['probe/fig/betas'] = wandb.Image(probe_fig)
