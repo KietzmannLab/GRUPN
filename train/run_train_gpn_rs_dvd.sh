@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=gpn_rs_dvd
-#SBATCH --output=gpn_rs_dvd_tm%a_%A.out
-#SBATCH --error=gpn_rs_dvd_tm%a_%A.err
+#SBATCH --output=/share/klab/psulewski/psulewski/memgate/logs/gpn_rs_dvd_tm%a_%A.out
+#SBATCH --error=/share/klab/psulewski/psulewski/memgate/logs/gpn_rs_dvd_tm%a_%A.err
 #SBATCH --array=1
 #SBATCH --time=48:00:00
 #SBATCH --mem=400GB
@@ -30,7 +30,7 @@
 # --save_every_epoch 1: the probe betas drift strongly over a run's own epochs
 # (memgate_v2/13_infonce_sweep_result.md), so a DVD-vs-SimCLR comparison is only valid at a
 # matched epoch or at the saved checkpoint. Keeping every epoch's weights makes the
-# matched-epoch extraction possible after the fact. ~100 MB x ~15 epochs per run.
+# matched-epoch extraction possible after the fact. ~38 MB x ~15 epochs per run.
 #
 # Prerequisites (all one-off, in this order):
 #   1. the exclusion indices, verified to transfer to the r50v4 files:
@@ -48,9 +48,12 @@ spack load cudnn@8.6.0.163-11.8
 spack load miniconda3
 conda activate lightning
 
+# after the env block: spack/conda init scripts trip -u
+set -euo pipefail
+
 # node-local /tmp is small and shared across the node; the probe's per-epoch wandb.Image() PNG
 # save filled it (job 12917643). Redirect temp files to shared scratch.
-export TMPDIR=/share/klab/psulewski/psulewski/pyavs/tmp
+export TMPDIR=/share/klab/psulewski/psulewski/memgate/tmp
 mkdir -p "${TMPDIR}"
 
 TM=${SLURM_ARRAY_TASK_ID}

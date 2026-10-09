@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=gsn_nce
-#SBATCH --output=gsn_nce_tau%a_%A.out
-#SBATCH --error=gsn_nce_tau%a_%A.err
+#SBATCH --output=/share/klab/psulewski/psulewski/memgate/logs/gsn_nce_tau%a_%A.out
+#SBATCH --error=/share/klab/psulewski/psulewski/memgate/logs/gsn_nce_tau%a_%A.err
 #SBATCH --array=0-2
 #SBATCH --time=48:00:00
 #SBATCH --mem=400GB
@@ -44,7 +44,10 @@ spack load cudnn@8.6.0.163-11.8
 spack load miniconda3
 conda activate lightning
 
-export TMPDIR=/share/klab/psulewski/psulewski/pyavs/tmp
+# after the env block: spack/conda init scripts trip -u
+set -euo pipefail
+
+export TMPDIR=/share/klab/psulewski/psulewski/memgate/tmp
 mkdir -p "${TMPDIR}"
 
 # tau sweep. 0.2 is mildly sharpened, 0.05 is aggressive; the baseline run is the tau -> inf
