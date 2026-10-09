@@ -63,6 +63,18 @@ if [ "${BBV}" = "6" ]; then PACK_SUFFIX=""; else PACK_SUFFIX="_dvd"; fi   # bbv 
 PACK=/share/klab/psulewski/psulewski/memdur_paper/data/behav/gpn_features/avs_probe_pack${PACK_SUFFIX}_v1.h5
 HELDOUT=/share/klab/psulewski/psulewski/memdur_paper/data/gpn_heldout
 
+PROBE=${PROBE:-1}
+# PROBE=0 drops the in-training duration probe (and with it the only use of the pack), so a run
+# can start before the pack exists. The probe is a diagnostic that never informs checkpoint
+# selection, and --save_every_epoch keeps every epoch's weights, so its betas stay recoverable
+# post-hoc via gpn_feature_extraction.py. Note net_name does NOT encode the probe: a later
+# PROBE=1 run at the same --network_id overwrites this one's checkpoints.
+PROBE_ARGS=(--probe 0)
+if [ "${PROBE}" = "1" ]; then
+    PROBE_ARGS=(--probe 1 --probe_pack "${PACK}" --probe_every 1 --probe_stats meta
+                --probe_layers 0 --probe_saccade_units train_units)
+fi
+
 echo "=========================================="
 echo "Training sGSN-RS (LSTM) tm=${TM}  InfoNCE semantic loss  tau=${TAU}  bbv=${BBV}"
 echo "Job ID: ${SLURM_JOB_ID}  Array task: ${SLURM_ARRAY_TASK_ID}"
@@ -97,11 +109,6 @@ python train_net.py \
     --dva_dataset NSD \
     --learning_rate 0.0001 \
     --network_id 1 \
-    --probe 1 \
-    --probe_pack ${PACK} \
-    --probe_every 1 \
-    --probe_stats meta \
-    --probe_layers 0 \
-    --probe_saccade_units train_units
+    "${PROBE_ARGS[@]}"
 
 echo "Training complete for sGSN-RS InfoNCE tau=${TAU} bbv=${BBV}"

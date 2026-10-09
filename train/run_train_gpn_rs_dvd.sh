@@ -60,8 +60,20 @@ TM=${SLURM_ARRAY_TASK_ID}
 PACK=/share/klab/psulewski/psulewski/memdur_paper/data/behav/gpn_features/avs_probe_pack_dvd_v1.h5
 HELDOUT=/share/klab/psulewski/psulewski/memdur_paper/data/gpn_heldout
 
+PROBE=${PROBE:-1}
+# PROBE=0 drops the in-training duration probe (and with it the only use of the pack), so a run
+# can start before the pack exists. The probe is a diagnostic that never informs checkpoint
+# selection, and --save_every_epoch keeps every epoch's weights, so its betas stay recoverable
+# post-hoc via gpn_feature_extraction.py. Note net_name does NOT encode the probe: a later
+# PROBE=1 run at the same --network_id overwrites this one's checkpoints.
+PROBE_ARGS=(--probe 0)
+if [ "${PROBE}" = "1" ]; then
+    PROBE_ARGS=(--probe 1 --probe_pack "${PACK}" --probe_every 1 --probe_stats meta
+                --probe_layers 0 --probe_saccade_units train_units)
+fi
+
 echo "=========================================="
-echo "Training GPN-RS (LSTM) tm=${TM}  bbv=4 (DVD-B)  AVS scenes held out  + duration probe"
+echo "Training GPN-RS (LSTM) tm=${TM}  bbv=4 (DVD-B)  AVS scenes held out  probe=${PROBE}"
 echo "Job ID: ${SLURM_JOB_ID}  Array task: ${TM}"
 echo "Node: ${SLURMD_NODENAME}"
 echo "=========================================="
@@ -92,11 +104,6 @@ python train_net.py \
     --learning_rate 0.0001 \
     --network_id 1 \
     --save_every_epoch 1 \
-    --probe 1 \
-    --probe_pack ${PACK} \
-    --probe_every 1 \
-    --probe_stats meta \
-    --probe_layers 0 \
-    --probe_saccade_units train_units
+    "${PROBE_ARGS[@]}"
 
 echo "Training complete for GPN-RS DVD-B tm=${TM}"
