@@ -30,6 +30,12 @@
 # the WS1 probe plus the full WS4 evaluation battery (memgate_v2/06_architecture_roadmap.md).
 #
 # Prerequisites: identical to run_train_gpn_rs_noavs.sh (exclusion indices + probe pack).
+#
+# BBV selects the glimpse backbone without editing this file: BBV=4 sbatch run_train_gsn_infonce.sh
+# runs the same sweep on the DVD-B embeddings. bbv is parameter-identical (both backbones are
+# 2048-d, input_feats is unchanged), so only the input statistics differ -- but the probe pack
+# must then be the DVD one, because it stores already-embedded glimpses. PACK follows BBV below,
+# and the probe refuses to run if the two disagree.
 
 # Load environment
 source ~/.bashrc
@@ -49,11 +55,13 @@ TAUS=(0.2 0.1 0.05)
 TAU=${TAUS[${SLURM_ARRAY_TASK_ID}]}
 
 TM=1
-PACK=/share/klab/psulewski/psulewski/memdur_paper/data/behav/gpn_features/avs_probe_pack_v1.h5
+BBV=${BBV:-6}
+if [ "${BBV}" = "6" ]; then PACK_SUFFIX=""; else PACK_SUFFIX="_dvd"; fi   # bbv 4 = DVD-B
+PACK=/share/klab/psulewski/psulewski/memdur_paper/data/behav/gpn_features/avs_probe_pack${PACK_SUFFIX}_v1.h5
 HELDOUT=/share/klab/psulewski/psulewski/memdur_paper/data/gpn_heldout
 
 echo "=========================================="
-echo "Training sGSN-RS (LSTM) tm=${TM}  InfoNCE semantic loss  tau=${TAU}"
+echo "Training sGSN-RS (LSTM) tm=${TM}  InfoNCE semantic loss  tau=${TAU}  bbv=${BBV}"
 echo "Job ID: ${SLURM_JOB_ID}  Array task: ${SLURM_ARRAY_TASK_ID}"
 echo "Node: ${SLURMD_NODENAME}"
 echo "=========================================="
@@ -67,7 +75,7 @@ python train_net.py \
     --timesteps 6 \
     --recurrence 1 \
     --provide_loc 1 \
-    --bbv 6 \
+    --bbv ${BBV} \
     --gaze_type dg3 \
     --input_dropout 0.25 \
     --rnn_dropout 0.1 \
@@ -93,4 +101,4 @@ python train_net.py \
     --probe_layers 0 \
     --probe_saccade_units train_units
 
-echo "Training complete for sGSN-RS InfoNCE tau=${TAU}"
+echo "Training complete for sGSN-RS InfoNCE tau=${TAU} bbv=${BBV}"

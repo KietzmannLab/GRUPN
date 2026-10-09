@@ -106,6 +106,10 @@ def main():
     parser.add_argument('--report_out', type=str, default=None)
     parser.add_argument('--exclusion_dir', type=str, default=None)
     parser.add_argument('--check_alignment', action='store_true')
+    # which glimpse dataset the alignment is checked against: 6 = SimCLR, 4 = DVD-B. The
+    # exclusion indices themselves are backbone-independent (positions in the source h5), so
+    # this only verifies that the r50v{bbv} files inherited the same row order and count.
+    parser.add_argument('--bbv', type=int, default=6)
     args = parser.parse_args()
 
     avs = load_avs_scenes()
@@ -117,7 +121,7 @@ def main():
     if args.check_alignment:
         print('Glimpse-dataset alignment:')
         for split in SPLITS:
-            check_dataset_alignment(split, len(split_ids[split]))
+            check_dataset_alignment(split, len(split_ids[split]), bbv=args.bbv)
 
     if args.report_out:
         report.to_csv(args.report_out, index=False)

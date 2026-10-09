@@ -36,6 +36,11 @@ parser.add_argument('--mix_pres', type=int, default=0)
 parser.add_argument('--in_memory', type=int, default=1)
 
 parser.add_argument('--save_nets', type=int, default=1) # save networks
+# per-epoch checkpoints. Off by default (15 x 100 MB per run). Needed to compare two runs at a
+# MATCHED epoch: the probe betas drift strongly with training epoch (memgate_v2/13), so any
+# cross-run beta comparison at each run's own early-stopping epoch confounds the manipulation
+# with training length.
+parser.add_argument('--save_every_epoch', type=int, default=0)
 parser.add_argument('--wandb', type=int, default=1) # 1 to enable Weights & Biases logging
 parser.add_argument('--wandb_project', type=str, default='grupn') # W&B project name
 parser.add_argument('--wandb_entity', type=str, default=None) # W&B entity (team/user)
@@ -175,6 +180,7 @@ if __name__ == '__main__':
             stats=args.probe_stats,
             memgate_dir=args.probe_memgate_dir,
             saccade_units=args.probe_saccade_units,
+            expect_bbv=args.bbv,   # the pack's glimpses must come from this backbone
         )
 
     if args.wandb:
@@ -208,6 +214,7 @@ if __name__ == '__main__':
                 'trainer': trainer_split,
                 'exclude_avs': args.exclude_avs,
                 'probe': args.probe,
+                'save_every_epoch': args.save_every_epoch,
             }
         )
 
@@ -398,10 +405,11 @@ if __name__ == '__main__':
                     if val_losses[-1] <= min(val_losses[:-1]):
                         print(f'Val loss decreased, saving network at epoch {epoch}...\n')
                         torch.save(net.state_dict(), f'{net_path}/{net_name}.pth')
-                    # torch.save(net.state_dict(), f'{net_path}/{net_name}_epoch_{epoch}.pth')
                 else:
                     print(f'Saving network at epoch {epoch}...\n')
                     torch.save(net.state_dict(), f'{net_path}/{net_name}.pth')
+                if args.save_every_epoch:
+                    torch.save(net.state_dict(), f'{net_path}/{net_name}_epoch_{epoch}.pth')
 
         if epoch > 1:
             # check if val loss has increased by more than 1% of min, if yes exit training

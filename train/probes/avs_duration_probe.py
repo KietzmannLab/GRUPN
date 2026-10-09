@@ -73,6 +73,11 @@ class AVSDurationProbe:
         on the published checkpoint it leaves 53% of coord_proj's 512 units with no
         across-fixation variance, i.e. half the RNN input frozen. Mirrors
         saccade_vectors() in avs_gazetime/memgate/gpn_feature_extraction.py.
+    expect_bbv : int or None
+        The `--bbv` the network is trained with. The pack stores *already-embedded* glimpses,
+        so a pack built with a different backbone silently feeds the network an input
+        distribution it never saw. When given, a pack whose `encoder_bbv` attribute differs
+        (or is missing) is refused rather than run.
     clean_only : bool
         Restrict to scenes that were never GPN training items (the pack's `clean` flag).
         Required for a valid beta whenever the network trained on AVS scenes; with a
@@ -83,7 +88,8 @@ class AVSDurationProbe:
 
     def __init__(self, pack_path, layers=(0,), provide_loc=1, clean_only=False,
                  chunk_seqs=128, device='cuda', stats='meta', figure=True,
-                 memgate_dir=DEFAULT_MEMGATE_DIR, saccade_units='train_units'):
+                 memgate_dir=DEFAULT_MEMGATE_DIR, saccade_units='train_units',
+                 expect_bbv=None):
         import h5py
 
         self.layers = tuple(layers)
@@ -102,6 +108,18 @@ class AVSDurationProbe:
             if 'saccade_px' not in f[sorted(f.keys())[0]]:
                 raise ValueError(f'{pack_path} predates pack v2 (no saccade_px); rebuild it '
                                  f'with build_avs_probe_pack.py')
+            self.encoder = str(f.attrs.get('encoder', 'unknown'))
+            self.encoder_bbv = (int(f.attrs['encoder_bbv'])
+                                if 'encoder_bbv' in f.attrs else None)
+            if expect_bbv is not None and self.encoder_bbv != int(expect_bbv):
+                raise ValueError(
+                    f'probe pack backbone mismatch: {pack_path} was built with '
+                    f'encoder_bbv={self.encoder_bbv} ({self.encoder}) but this network trains '
+                    f'on bbv={int(expect_bbv)}. The pack stores already-embedded glimpses, so '
+                    f'it cannot be reused across backbones — rebuild it with '
+                    f'build_avs_probe_pack.py --backbone <matching> and a separate '
+                    f'--pack_path. (encoder_bbv=None means the pack predates the backbone '
+                    f'stamp; rebuild it.)')
             geometry = {k: float(f.attrs[k]) for k in
                         ('screen_width', 'screen_height', 'image_width', 'image_height',
                          'train_image_size')}
@@ -129,6 +147,7 @@ class AVSDurationProbe:
         sacc = np.concatenate([d['saccade_vec'] for d in self.subjects.values()])
         print(f'[probe] {len(self.subjects)} subjects, {n_fix} analysed fixations '
               f'({n_clean} on never-trained scenes), pack v{self.pack_version}, '
+              f'encoder {self.encoder}, '
               f'saccade units {self.saccade_units} '
               f'(per-axis sd {np.abs(sacc).std(0).round(3).tolist()})')
 
