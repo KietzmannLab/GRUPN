@@ -55,7 +55,8 @@ def build_net(net_name, hyp):
                n_rnn=hyp['n_rnn'], regularisation=hyp['regularisation'],
                input_dropout=hyp['input_dropout'], rnn_dropout=hyp['rnn_dropout'],
                input_split=hyp['input_split'], recurrence=hyp['recurrence'],
-               input_feats=hyp['input_feats'])
+               input_feats=hyp['input_feats'],
+               gist_init=hyp.get('gist_init', 0), gist_source=hyp.get('gist_source', 'traj_mean'))
 
 
 def epoch_checkpoints(net_dir, net_name):
