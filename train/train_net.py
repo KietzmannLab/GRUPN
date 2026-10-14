@@ -55,7 +55,10 @@ parser.add_argument('--probe_layers', type=str, default='0') # comma-separated R
 parser.add_argument('--probe_memgate_dir', type=str, default='/home/student/p/psulewski/avs-gazetime/avs_gazetime/memgate')
 parser.add_argument('--probe_saccade_units', type=str, default='train_units', choices=['train_units', 'legacy']) # must match the units this network is trained on
 
-parser.add_argument('--bbv', type=int, default=6) # 0 is RN50-init, 1/2 is RN50-IN trained, 3 is RN50-Barlowtwins, 4 is RN50-DVD-B, 5 is DINOv2B, 6 is RN50-simclr
+parser.add_argument('--bbv', type=int, default=4) # 0 is RN50-init, 1/2 is RN50-IN trained, 3 is RN50-Barlowtwins, 4 is RN50-DVD-B, 5 is DINOv2B, 6 is RN50-simclr
+
+parser.add_argument('--gist_init', type=int, default=0, choices=[0, 1]) # 0 = zero h0/c0 (published); 1 = project a scene gist into h0/c0 (memgate_v2/04_gist_initialisation.md)
+parser.add_argument('--gist_source', type=str, default='traj_mean', choices=['traj_mean']) # traj_mean = mean-pool this trace's own fed crop embeddings (actvs_seq); a cheap smoke-test control, NOT the real low-SF gist: it leaks future fixations into t=0 and carries foveal, not peripheral/low-SF, information (memgate_v2/04 section 4)
 
 args = parser.parse_args()
 
@@ -108,7 +111,9 @@ hyp = {
         'rnn_dropout': args.rnn_dropout,
         'analysis_mode': 0, # this will only return outputs
         'input_split': args.input_split, # 0 if provide image and saccade at the same time, 1 if provide image and saccade separately
-        'recurrence': args.recurrence # 0 if no recurrence, 1 if recurrence
+        'recurrence': args.recurrence, # 0 if no recurrence, 1 if recurrence
+        'gist_init': args.gist_init, # 0 = zero h0/c0 (published), 1 = scene-gist-projected h0/c0
+        'gist_source': args.gist_source, # which gist variant feeds gist_init (see --gist_source help)
     },
     'optimizer': { # we do not need normalise data as RN50 already used BN before avgpool
         'type': 'adam', # optimizer to be used
@@ -215,6 +220,8 @@ if __name__ == '__main__':
                 'exclude_avs': args.exclude_avs,
                 'probe': args.probe,
                 'save_every_epoch': args.save_every_epoch,
+                'gist_init': args.gist_init,
+                'gist_source': args.gist_source,
             }
         )
 

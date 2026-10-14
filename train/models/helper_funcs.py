@@ -38,6 +38,13 @@ def get_network_model(hyp):
     trainer = hyp['optimizer']['trainer']
     lr = hyp['optimizer']['lr']
 
+    # memgate_v2/04: h0/c0 init from a scene gist instead of zeros. gist_tag is '0' for the
+    # published zero-init and the gist_source string otherwise, so a model change always shows
+    # up in the checkpoint name.
+    gist_init = hyp['network'].get('gist_init', 0)
+    gist_source = hyp['network'].get('gist_source', 'traj_mean')
+    gist_tag = '0' if not gist_init else gist_source
+
     # the InfoNCE semantic loss carries its temperature in the name, so a temperature sweep
     # separates into its own checkpoints/logs/W&B runs; empty for the published variants, which
     # keeps their names (and `_semc_(\d+)_` parsing downstream) byte-identical
@@ -49,17 +56,17 @@ def get_network_model(hyp):
 
         from .GPN import lstm_gpn
 
-        net = lstm_gpn(timestep_multiplier=timestep_multiplier,glimpse_loss=glimpse_loss,semantic_loss=semantic_loss,scene_loss=scene_loss,gazeloc_loss=gazeloc_loss,n_rnn=n_rnn,regularisation=regularisation,input_dropout=input_dropout,rnn_dropout=rnn_dropout,return_all_actvs=analysis_mode, input_split=input_split, recurrence=recurrence, input_feats=768 if bbv == 5 else 2048)
+        net = lstm_gpn(timestep_multiplier=timestep_multiplier,glimpse_loss=glimpse_loss,semantic_loss=semantic_loss,scene_loss=scene_loss,gazeloc_loss=gazeloc_loss,n_rnn=n_rnn,regularisation=regularisation,input_dropout=input_dropout,rnn_dropout=rnn_dropout,return_all_actvs=analysis_mode, input_split=input_split, recurrence=recurrence, input_feats=768 if bbv == 5 else 2048, gist_init=gist_init, gist_source=gist_source)
 
-        net_name = f'gpn_lstm_n_{n_rnn}_tm_{timestep_multiplier}_t_{timesteps}_recurrence_{recurrence}_loc_{provide_loc}_bbv{bbv}_gaze_{gaze_type}_indp_{input_dropout}_rnndp_{rnn_dropout}_gcpc_{glimpse_loss}_semc_{semantic_loss}{sem_tag}_scc_{scene_loss}_locmse_{gazeloc_loss}_insplit_{input_split}_reg_{regularisation}_tr_{trainer}_gdva_{dva_dataset}_lr_{lr}_num_{network_id}'
+        net_name = f'gpn_lstm_n_{n_rnn}_tm_{timestep_multiplier}_t_{timesteps}_recurrence_{recurrence}_loc_{provide_loc}_bbv{bbv}_gist_{gist_tag}_gaze_{gaze_type}_indp_{input_dropout}_rnndp_{rnn_dropout}_gcpc_{glimpse_loss}_semc_{semantic_loss}{sem_tag}_scc_{scene_loss}_locmse_{gazeloc_loss}_insplit_{input_split}_reg_{regularisation}_tr_{trainer}_gdva_{dva_dataset}_lr_{lr}_num_{network_id}'
 
     elif hyp['network']['model'] == 'gru':
 
         from .GPN import gru_gpn
 
-        net = gru_gpn(timestep_multiplier=timestep_multiplier,glimpse_loss=glimpse_loss,semantic_loss=semantic_loss,scene_loss=scene_loss,gazeloc_loss=gazeloc_loss,n_rnn=n_rnn,regularisation=regularisation,input_dropout=input_dropout,rnn_dropout=rnn_dropout,return_all_actvs=analysis_mode, input_split=input_split, recurrence=recurrence, input_feats=768 if bbv == 5 else 2048)
+        net = gru_gpn(timestep_multiplier=timestep_multiplier,glimpse_loss=glimpse_loss,semantic_loss=semantic_loss,scene_loss=scene_loss,gazeloc_loss=gazeloc_loss,n_rnn=n_rnn,regularisation=regularisation,input_dropout=input_dropout,rnn_dropout=rnn_dropout,return_all_actvs=analysis_mode, input_split=input_split, recurrence=recurrence, input_feats=768 if bbv == 5 else 2048, gist_init=gist_init, gist_source=gist_source)
 
-        net_name = f'gpn_gru_n_{n_rnn}_tm_{timestep_multiplier}_t_{timesteps}_recurrence_{recurrence}_loc_{provide_loc}_bbv{bbv}_gaze_{gaze_type}_indp_{input_dropout}_rnndp_{rnn_dropout}_gcpc_{glimpse_loss}_semc_{semantic_loss}{sem_tag}_scc_{scene_loss}_locmse_{gazeloc_loss}_insplit_{input_split}_reg_{regularisation}_tr_{trainer}_gdva_{dva_dataset}_lr_{lr}_num_{network_id}'
+        net_name = f'gpn_gru_n_{n_rnn}_tm_{timestep_multiplier}_t_{timesteps}_recurrence_{recurrence}_loc_{provide_loc}_bbv{bbv}_gist_{gist_tag}_gaze_{gaze_type}_indp_{input_dropout}_rnndp_{rnn_dropout}_gcpc_{glimpse_loss}_semc_{semantic_loss}{sem_tag}_scc_{scene_loss}_locmse_{gazeloc_loss}_insplit_{input_split}_reg_{regularisation}_tr_{trainer}_gdva_{dva_dataset}_lr_{lr}_num_{network_id}'
 
     print(f'\nNetwork name: {net_name}')
 

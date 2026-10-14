@@ -6,7 +6,7 @@ from torchvision.models import resnet18
 
 class lstm_gpn(nn.Module):
 
-    def __init__(self, timestep_multiplier=3, glimpse_loss=1, semantic_loss=0, scene_loss=0, gazeloc_loss=0, n_rnn=256, regularisation=1, input_dropout=0.25, rnn_dropout=0.1, return_all_actvs=0, input_split=0, recurrence=True, input_feats=2048):
+    def __init__(self, timestep_multiplier=3, glimpse_loss=1, semantic_loss=0, scene_loss=0, gazeloc_loss=0, n_rnn=256, regularisation=1, input_dropout=0.25, rnn_dropout=0.1, return_all_actvs=0, input_split=0, recurrence=True, input_feats=2048, gist_init=0, gist_source='traj_mean'):
 
         super(lstm_gpn, self).__init__()
 
@@ -22,6 +22,16 @@ class lstm_gpn(nn.Module):
         self.timestep_multiplier = timestep_multiplier
         self.lstm = nn.LSTM(n_rnn,n_rnn,self.timestep_multiplier,dropout = rnn_dropout if regularisation else 0,batch_first=True) if self.recurrence else NonRecurrentLSTM(n_rnn,n_rnn,self.timestep_multiplier,dropout = rnn_dropout if regularisation else 0,batch_first=True)
         self.lstm_norm = nn.LayerNorm(n_rnn) if regularisation else nn.Identity()
+
+        # WS3a (memgate_v2/04): project a scene gist into (h0, c0) instead of the implicit
+        # zero init. gist_source='traj_mean' is a cheap control (mean-pool this trace's own fed
+        # crops) that leaks future fixations into t=0 and carries foveal, not low-SF, content —
+        # it is not a stand-in for the real gist pipeline, see memgate_v2/04 section 4.
+        self.gist_init = gist_init
+        self.gist_source = gist_source
+        if self.gist_init:
+            self.gist_norm = nn.LayerNorm(input_feats)
+            self.gist_proj = nn.Linear(input_feats, n_rnn * self.timestep_multiplier * 2) # *2 for h0 and c0
 
         self.glimpse_loss = glimpse_loss
         if self.glimpse_loss:
@@ -74,13 +84,27 @@ class lstm_gpn(nn.Module):
 
         activations['joint_proj'] = torch.cat((actv_proj,coord_proj),dim=2) if self.input_split == 0 else torch.cat((new_actvs_proj,new_coord_proj),dim=2)
 
+        h0 = c0 = None
+        if self.gist_init:
+            if self.gist_source == 'traj_mean':
+                gist = actvs_seq.mean(dim=1) # [B, input_feats] -- mean over the fed crops, leaks the whole trace into t=0 by construction
+            else:
+                raise NotImplementedError(f'gist_source={self.gist_source!r} not implemented')
+            B = actvs_seq.shape[0]
+            g = self.gist_proj(self.gist_norm(gist)) # [B, L*n_rnn*2]
+            h0_flat, c0_flat = g.chunk(2, dim=-1)
+            h0 = torch.tanh(h0_flat).view(B, self.timestep_multiplier, -1).transpose(0, 1).contiguous()
+            c0 = c0_flat.view(B, self.timestep_multiplier, -1).transpose(0, 1).contiguous() # c unbounded by design
+            activations['gist_h0'] = h0
+            activations['gist_c0'] = c0
+
         if self.return_all_actvs:
             _, seq_len, _ = activations['joint_proj'].size()
             all_hidden_states = [[] for _ in range(self.timestep_multiplier)]
             all_c_states = [[] for _ in range(self.timestep_multiplier)]
             for t in range(seq_len):
                 if t == 0:
-                    _, (hn, cn) = self.lstm(activations['joint_proj'][:, t].unsqueeze(1))
+                    _, (hn, cn) = self.lstm(activations['joint_proj'][:, t].unsqueeze(1), (h0, c0)) if self.gist_init else self.lstm(activations['joint_proj'][:, t].unsqueeze(1))
                 else:
                     _, (hn, cn) = self.lstm(activations['joint_proj'][:, t].unsqueeze(1), (hn, cn))
                 for layer in range(self.timestep_multiplier):
@@ -91,7 +115,7 @@ class lstm_gpn(nn.Module):
                 activations[f'lstm_c_{layer}'] = torch.cat(all_c_states[layer], dim=1) if self.input_split == 0 else torch.cat(all_c_states[layer][::2], dim=1) # keep only the image stream
             lstm_out = torch.cat(all_hidden_states[-1], dim=1)
         else:
-            lstm_out, _ = self.lstm(activations['joint_proj'])
+            lstm_out, _ = self.lstm(activations['joint_proj'], (h0, c0)) if self.gist_init else self.lstm(activations['joint_proj'])
         activations['lstm_out'] = self.lstm_norm(lstm_out)
         activations['joint_proj'] = activations['joint_proj'] if self.input_split == 0 else activations['joint_proj'][:,::2] # keep only the image stream
 
@@ -437,7 +461,8 @@ class gru_gpn(nn.Module):
     def __init__(self, timestep_multiplier=3, glimpse_loss=1, semantic_loss=0,
                  scene_loss=0, gazeloc_loss=0, n_rnn=256, regularisation=1,
                  input_dropout=0.25, rnn_dropout=0.1, return_all_actvs=0,
-                 input_split=0, recurrence=True, input_feats=2048):
+                 input_split=0, recurrence=True, input_feats=2048,
+                 gist_init=0, gist_source='traj_mean'):
 
         super(gru_gpn, self).__init__()
 
@@ -460,6 +485,14 @@ class gru_gpn(nn.Module):
                                        dropout=rnn_dropout if regularisation else 0,
                                        batch_first=True)
         self.gru_norm = nn.LayerNorm(n_rnn) if regularisation else nn.Identity()
+
+        # WS3a (memgate_v2/04): project a scene gist into h0 instead of the implicit zero init.
+        # See lstm_gpn above for the gist_source='traj_mean' caveats (leakage, foveal content).
+        self.gist_init = gist_init
+        self.gist_source = gist_source
+        if self.gist_init:
+            self.gist_norm = nn.LayerNorm(input_feats)
+            self.gist_proj = nn.Linear(input_feats, n_rnn * self.timestep_multiplier) # GRU has no cell state
 
         self.glimpse_loss = glimpse_loss
         if self.glimpse_loss:
@@ -517,12 +550,23 @@ class gru_gpn(nn.Module):
                                      if self.input_split == 0
                                      else torch.cat((new_actvs_proj, new_coord_proj), dim=2))
 
+        h0 = None
+        if self.gist_init:
+            if self.gist_source == 'traj_mean':
+                gist = actvs_seq.mean(dim=1) # [B, input_feats] -- mean over the fed crops, leaks the whole trace into t=0 by construction
+            else:
+                raise NotImplementedError(f'gist_source={self.gist_source!r} not implemented')
+            B = actvs_seq.shape[0]
+            h0_flat = self.gist_proj(self.gist_norm(gist)) # [B, L*n_rnn]
+            h0 = torch.tanh(h0_flat).view(B, self.timestep_multiplier, -1).transpose(0, 1).contiguous()
+            activations['gist_h0'] = h0
+
         if self.return_all_actvs:
             _, seq_len, _ = activations['joint_proj'].size()
             all_hidden_states = [[] for _ in range(self.timestep_multiplier)]
             for t in range(seq_len):
                 if t == 0:
-                    _, hn = self.gru(activations['joint_proj'][:, t].unsqueeze(1))
+                    _, hn = self.gru(activations['joint_proj'][:, t].unsqueeze(1), h0) if self.gist_init else self.gru(activations['joint_proj'][:, t].unsqueeze(1))
                 else:
                     _, hn = self.gru(activations['joint_proj'][:, t].unsqueeze(1), hn)
                 for layer in range(self.timestep_multiplier):
@@ -535,7 +579,7 @@ class gru_gpn(nn.Module):
                 )
             gru_out = torch.cat(all_hidden_states[-1], dim=1)
         else:
-            gru_out, _ = self.gru(activations['joint_proj'])
+            gru_out, _ = self.gru(activations['joint_proj'], h0) if self.gist_init else self.gru(activations['joint_proj'])
 
         activations['gru_out'] = self.gru_norm(gru_out)
         activations['joint_proj'] = (activations['joint_proj']

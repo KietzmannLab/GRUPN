@@ -109,7 +109,7 @@ def main():
     # which glimpse dataset the alignment is checked against: 6 = SimCLR, 4 = DVD-B. The
     # exclusion indices themselves are backbone-independent (positions in the source h5), so
     # this only verifies that the r50v{bbv} files inherited the same row order and count.
-    parser.add_argument('--bbv', type=int, default=6)
+    parser.add_argument('--bbv', type=int, default=4)
     args = parser.parse_args()
 
     avs = load_avs_scenes()
