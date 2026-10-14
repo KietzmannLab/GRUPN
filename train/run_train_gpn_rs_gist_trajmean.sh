@@ -23,17 +23,15 @@
 # Any duration-beta gain here must be read as "does *any* non-zero scene-correlated init move
 # the betas" and reported as such -- never as evidence for the gist hypothesis itself.
 #
-# --probe 0, --save_every_epoch 1: mirrors run_train_gpn_rs_dvd.sh's own methodology (that run
-# was also trained with the live probe off and its betas recovered after the fact via
-# probes/probe_checkpoints.py) so the two runs are comparable by the same recovery procedure,
-# not just the same architecture. Recover this run's betas with:
-#
-#   python probes/probe_checkpoints.py \
-#       --net_dir logs/net_params/<net_name printed at the top of this job's .out> \
-#       --pack /share/klab/psulewski/psulewski/memdur_paper/data/behav/gpn_features/avs_probe_pack_dvd_v1.h5 \
-#       --loss_npz logs/perf_logs/<net_name>/loss_<net_name>.npz \
-#       --label "gist (traj-mean)" \
-#       --out_csv gist_trajmean_history.csv
+# --probe 1, --save_every_epoch 1: logs the AVS gate->duration betas live, every epoch, to
+# wandb (verified working, memgate_v2/10_implementation_notes.md) -- switched from the
+# probe-disabled + post-hoc-recovery approach of run_train_gpn_rs_dvd.sh's pilot after the user
+# asked to see context-gate betas during this run rather than wait for it to finish.
+# --save_every_epoch 1 is kept regardless, so matched-epoch re-extraction stays possible after
+# the fact if a checkpoint needs re-probing (e.g. with --probe_stats mixedlm at a milestone
+# epoch): probes/probe_checkpoints.py --net_dir logs/net_params/<net_name> --pack ${PACK} \
+# --loss_npz logs/perf_logs/<net_name>/loss_<net_name>.npz --label "gist (traj-mean)" \
+# --out_csv gist_trajmean_history.csv
 #
 # Prerequisites (both already confirmed present on the cluster, 2026-10-14):
 #   - exclusion indices aligned to bbv 4: /share/klab/psulewski/psulewski/memdur_paper/data/gpn_heldout/
@@ -59,6 +57,7 @@ mkdir -p "${TMPDIR}"
 
 TM=${SLURM_ARRAY_TASK_ID}
 HELDOUT=/share/klab/psulewski/psulewski/memdur_paper/data/gpn_heldout
+PACK=/share/klab/psulewski/psulewski/memdur_paper/data/behav/gpn_features/avs_probe_pack_dvd_v1.h5
 
 echo "=========================================="
 echo "Training GPN-RS (LSTM) tm=${TM}  bbv=4 (DVD-B)  gist_init=1 (traj_mean)  AVS scenes held out"
@@ -94,6 +93,11 @@ python train_net.py \
     --learning_rate 0.0001 \
     --network_id 1 \
     --save_every_epoch 1 \
-    --probe 0
+    --probe 1 \
+    --probe_pack ${PACK} \
+    --probe_every 1 \
+    --probe_stats meta \
+    --probe_layers 0 \
+    --probe_saccade_units train_units
 
 echo "Training complete for GPN-RS gist_trajmean tm=${TM}"
