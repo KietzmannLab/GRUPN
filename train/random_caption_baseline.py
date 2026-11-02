@@ -1,0 +1,153 @@
+"""
+Empirical "random caption prediction" baseline for the memorygate semantic contrastive loss.
+
+Reuses the project's OWN create_cpc_matrix / compute_losses (no reimplementation of the loss
+math) and only the 'mpnet_embeddings' arrays of the GPN dataset h5 files -- no glimpses, no
+checkpoint, no GPU needed. Mirrors exactly the run logged to wandb as
+kietzmannlab/grupn/m8iqdcjf (gpn_lstm_n_1024_tm_1_t_6_..._bbv6_..._semc_1_..._tr_train_515_...):
+  dataset_path = /share/klab/datasets/GPN/, bbv=6, trainer=train_515, timesteps T=6,
+  batch_size=512 (default, unmodified by every run_train_*.sh on the cluster -- checked).
+
+For each batch we call compute_losses twice:
+  - outputs[1] = the TRUE target repeated across T steps  -> "oracle"/perfect-prediction loss.
+    contrastive_loss_floor returned alongside it is independent of outputs and is the SAME
+    floor quantity train_net.py logs -- used here only as a sanity check against the already
+    logged values (train -0.8639, val -0.8349).
+  - outputs[1] = a random OTHER sample's target (derangement, no fixed points) repeated across
+    T steps -> "random caption prediction" loss, i.e. the loss a predictor with zero information
+    about scene identity would get.
+Both losses are averaged unweighted over batches within one pass (matching train_net.py's own
+running-mean convention), repeated over many random derangements / shuffles to report a mean +/- SD
+rather than a single draw.
+"""
+import json
+import os
+import numpy as np
+import h5py
+import torch
+
+from helpers.helper_funcs import create_cpc_matrix, CONDS_TEMPLATE
+from models.helper_funcs import compute_losses
+
+DATASET_PATH = '/share/klab/datasets/GPN/'
+DATASET_STR = 'coco_NSD_dg3fix91_r50v6ap_7fix'
+N_TRACES = 10           # dg3_fix_actvs.shape[1], confirmed via h5 metadata
+TIMESTEPS = 6           # run name's t_6 / args.timesteps default
+BATCH_SIZE = 512        # args.batch_size default, unmodified by any run_train_*.sh on hpc3
+N_REPS = 20
+SEED = 0
+
+HYP = {'optimizer': {'losses': {'glimpse_loss': 0, 'semantic_loss': 1,
+                                 'scene_loss': 0, 'gazeloc_loss': 0}}}
+
+
+def load_embeddings(split):
+    """Per-image mpnet embeddings for 'train_515' or 'val', in CocoGaze's own row order."""
+    if split == 'val':
+        with h5py.File(f'{DATASET_PATH}{DATASET_STR}_val.h5', 'r') as f:
+            return f['val']['mpnet_embeddings'][()].astype(np.float32)
+    elif split == 'train_515':
+        with h5py.File(f'{DATASET_PATH}{DATASET_STR}_train.h5', 'r') as f:
+            train_emb = f['train']['mpnet_embeddings'][()].astype(np.float32)
+        with h5py.File(f'{DATASET_PATH}{DATASET_STR}_test.h5', 'r') as f:
+            test_emb_full = f['test']['mpnet_embeddings'][()].astype(np.float32)
+        conds = np.load(CONDS_TEMPLATE.format(n=515))
+        test_idx = np.setdiff1d(np.arange(test_emb_full.shape[0]), conds)
+        return np.concatenate([train_emb, test_emb_full[test_idx]], axis=0)
+    raise ValueError(split)
+
+
+def derangement(n, rng):
+    """Random permutation of arange(n) with no fixed points (needed for batches >= 2 rows)."""
+    perm = rng.permutation(n)
+    fixed = np.nonzero(perm == np.arange(n))[0]
+    while len(fixed):
+        # resolve fixed points by rotating them against each other (or the whole array if n==1)
+        if len(fixed) == 1 and n > 1:
+            j = rng.integers(0, n)
+            while j == fixed[0]:
+                j = rng.integers(0, n)
+            perm[fixed[0]], perm[j] = perm[j], perm[fixed[0]]
+        else:
+            shuffled = rng.permutation(fixed)
+            perm[fixed] = shuffled
+        fixed = np.nonzero(perm == np.arange(n))[0]
+    return perm
+
+
+def batches_for_split(n_images, shuffle, rng):
+    flat_img_idx = np.repeat(np.arange(n_images), N_TRACES)  # matches CocoGaze idx//n_traces
+    if shuffle:
+        flat_img_idx = flat_img_idx[rng.permutation(len(flat_img_idx))]
+    for start in range(0, len(flat_img_idx), BATCH_SIZE):
+        yield flat_img_idx[start:start + BATCH_SIZE]
+
+
+def run_pass(embeddings, shuffle, rng):
+    """One pass over the split; returns (mean_oracle, mean_floor, mean_random) over batches,
+    unweighted, exactly mirroring train_net.py's own running-mean convention."""
+    oracle_sum = floor_sum = random_sum = 0.0
+    n_batches = 0
+    for batch_img_idx in batches_for_split(embeddings.shape[0], shuffle, rng):
+        b = len(batch_img_idx)
+        if b < 2:
+            continue  # can't build a negative pair
+        A_batch = torch.from_numpy(embeddings[batch_img_idx])            # [b, 768]
+        perm = derangement(b, rng)
+        B_random_batch = A_batch[perm]                                   # [b, 768], no self-match
+
+        cpc_mask = create_cpc_matrix(b * TIMESTEPS, TIMESTEPS)
+
+        outputs_oracle = [None, A_batch.unsqueeze(1).repeat(1, TIMESTEPS, 1), None, None]
+        outputs_random = [None, B_random_batch.unsqueeze(1).repeat(1, TIMESTEPS, 1), None, None]
+
+        loss_oracle, floor, _ = compute_losses(outputs_oracle, None, None, A_batch, None,
+                                                cpc_mask, HYP, 1)
+        loss_random, floor2, _ = compute_losses(outputs_random, None, None, A_batch, None,
+                                                  cpc_mask, HYP, 1)
+        # floor and floor2 are both independent of `outputs` (pure A@A.T) -- should match exactly
+        assert abs(floor.item() - floor2.item()) < 1e-6
+
+        oracle_sum += loss_oracle.item()
+        floor_sum += floor.item()
+        random_sum += loss_random.item()
+        n_batches += 1
+
+    return oracle_sum / n_batches, floor_sum / n_batches, random_sum / n_batches
+
+
+def main():
+    rng = np.random.default_rng(SEED)
+    results = {}
+    for split_name, split_key, shuffle in [('train_515', 'train_515', True), ('val', 'val', False)]:
+        embeddings = load_embeddings(split_key)
+        oracles, floors, randoms = [], [], []
+        for rep in range(N_REPS):
+            o, f, r = run_pass(embeddings, shuffle, rng)
+            oracles.append(o); floors.append(f); randoms.append(r)
+            print(f'[{split_name}] rep {rep}: oracle={o:+.4f} floor={f:+.4f} random={r:+.4f}',
+                  flush=True)
+        results[split_name] = {
+            'n_images': int(embeddings.shape[0]),
+            'oracle_mean': float(np.mean(oracles)), 'oracle_sd': float(np.std(oracles, ddof=1)),
+            'floor_mean': float(np.mean(floors)), 'floor_sd': float(np.std(floors, ddof=1)),
+            'random_mean': float(np.mean(randoms)), 'random_sd': float(np.std(randoms, ddof=1)),
+            'n_reps': N_REPS,
+        }
+        print(f'[{split_name}] SUMMARY: oracle={results[split_name]["oracle_mean"]:+.4f}'
+              f'+/-{results[split_name]["oracle_sd"]:.4f}  '
+              f'floor={results[split_name]["floor_mean"]:+.4f}+/-{results[split_name]["floor_sd"]:.4f}  '
+              f'random={results[split_name]["random_mean"]:+.4f}+/-{results[split_name]["random_sd"]:.4f}',
+              flush=True)
+
+    out_path = '/share/klab/psulewski/psulewski/memgate/random_caption_baseline.json'
+    mode = 'r+' if os.path.exists(out_path) else 'x'
+    with open(out_path, mode) as fh:
+        fh.seek(0)
+        json.dump(results, fh, indent=2)
+        fh.truncate()
+    print(f'wrote {out_path}', flush=True)
+
+
+if __name__ == '__main__':
+    main()
