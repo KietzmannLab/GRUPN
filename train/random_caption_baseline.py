@@ -1,12 +1,16 @@
 """
 Empirical "random caption prediction" baseline for the memorygate semantic contrastive loss.
 
-Mirrors exactly the run logged to wandb as kietzmannlab/grupn/m8iqdcjf
-(gpn_lstm_n_1024_tm_1_t_6_..._bbv6_..._semc_1_..._tr_train_515_...):
-  dataset_path = /share/klab/datasets/GPN/, bbv=6, trainer=train_515, timesteps T=6,
-  batch_size=512 (default, unmodified by every run_train_*.sh on the cluster -- checked).
-Needs only the 'mpnet_embeddings' arrays of the GPN dataset h5 files -- no glimpses, no
-checkpoint, no GPU.
+Covers both memorygate loss-curve runs: the published bbv6/SimCLR run (kietzmannlab/grupn/m8iqdcjf,
+gpn_lstm_n_1024_tm_1_t_6_..._bbv6_..._semc_1_..._tr_train_515_...) and its bbv4/DVD-B leakage-control
+counterpart (..._bbv4_..._tr_train_515_noavs_...) that superseded SimCLR as the standard backbone on
+2026-10-14. The floor/chance values below are independent of the glimpse backbone entirely (they are
+computed purely from the target caption embeddings, never from the network's glimpse features), so
+only the SPLIT -- which images are in train/val, with or without the AVS-leakage exclusions --
+matters; that split is reproduced exactly via CocoGaze's own parse_split/_drop/load_avs_exclusions.
+dataset_path = /share/klab/datasets/GPN/, timesteps T=6, batch_size=512 (default, unmodified by any
+run_train_*.sh on the cluster -- checked). Needs only the 'mpnet_embeddings' arrays of the GPN
+dataset h5 files -- no glimpses, no checkpoint, no GPU.
 
 compute_losses' semantic_loss==1 branch expands each sample's embedding T-fold (one row per
 LSTM timestep) before building the N=batch_size*T similarity matrix. For a target-vs-target
@@ -36,7 +40,8 @@ import numpy as np
 import h5py
 import torch
 
-from helpers.helper_funcs import create_cpc_matrix, CONDS_TEMPLATE
+from helpers.helper_funcs import create_cpc_matrix, CONDS_TEMPLATE, HELDOUT_DIR
+from helpers.helper_funcs import parse_split, load_avs_exclusions, _drop
 from models.helper_funcs import compute_losses
 
 DATASET_PATH = '/share/klab/datasets/GPN/'
@@ -52,20 +57,30 @@ HYP = {'optimizer': {'losses': {'glimpse_loss': 0, 'semantic_loss': 1,
                                  'scene_loss': 0, 'gazeloc_loss': 0}}}
 
 
+def _read_mpnet(src):
+    with h5py.File(f'{DATASET_PATH}{DATASET_STR}_{src}.h5', 'r') as f:
+        return f[src]['mpnet_embeddings'][()].astype(np.float32)
+
+
 def load_embeddings(split):
-    """Per-image mpnet embeddings for 'train_515' or 'val', in CocoGaze's own row order."""
-    if split == 'val':
-        with h5py.File(f'{DATASET_PATH}{DATASET_STR}_val.h5', 'r') as f:
-            return f['val']['mpnet_embeddings'][()].astype(np.float32)
-    elif split == 'train_515':
-        with h5py.File(f'{DATASET_PATH}{DATASET_STR}_train.h5', 'r') as f:
-            train_emb = f['train']['mpnet_embeddings'][()].astype(np.float32)
-        with h5py.File(f'{DATASET_PATH}{DATASET_STR}_test.h5', 'r') as f:
-            test_emb_full = f['test']['mpnet_embeddings'][()].astype(np.float32)
-        conds = np.load(CONDS_TEMPLATE.format(n=515))
-        test_idx = np.setdiff1d(np.arange(test_emb_full.shape[0]), conds)
-        return np.concatenate([train_emb, test_emb_full[test_idx]], axis=0)
-    raise ValueError(split)
+    """Per-image mpnet embeddings for any CocoGaze split string ('val', 'val_noavs',
+    'train_515', 'train_515_noavs', ...), in CocoGaze's own row order -- mirrors CocoGaze's
+    own segment-building logic (helpers/helper_funcs.py: parse_split/_drop/load_avs_exclusions)
+    so the AVS-leakage-control exclusions match exactly."""
+    base, test_case, exclude_avs = parse_split(split)
+    exclusions = load_avs_exclusions(HELDOUT_DIR) if exclude_avs else {}
+
+    if test_case is None:
+        emb = _read_mpnet(base)
+        idx = _drop(np.arange(emb.shape[0]), exclusions.get(base))
+        return emb[idx]
+
+    train_emb = _read_mpnet('train')
+    train_idx = _drop(np.arange(train_emb.shape[0]), exclusions.get('train'))
+    test_emb = _read_mpnet('test')
+    conds = np.load(CONDS_TEMPLATE.format(n=test_case))
+    test_idx = _drop(np.setdiff1d(np.arange(test_emb.shape[0]), conds), exclusions.get('test'))
+    return np.concatenate([train_emb[train_idx], test_emb[test_idx]], axis=0)
 
 
 def derangement(n, rng):
@@ -152,11 +167,19 @@ def run_pass(embeddings, shuffle, rng, crosscheck_remaining):
     return floor_sum / n_batches, random_sum / n_batches
 
 
+SPLITS = [
+    ('train_515', True),          # bbv6/SimCLR run (kietzmannlab/grupn/m8iqdcjf)
+    ('val', False),
+    ('train_515_noavs', True),    # bbv4/DVD-B leakage-control run
+    ('val_noavs', False),
+]
+
+
 def main():
     rng = np.random.default_rng(SEED)
     results = {}
-    for split_name, split_key, shuffle in [('train_515', 'train_515', True), ('val', 'val', False)]:
-        embeddings = load_embeddings(split_key)
+    for split_name, shuffle in SPLITS:
+        embeddings = load_embeddings(split_name)
         crosscheck_remaining = [N_CROSSCHECK_BATCHES]
         floors, randoms = [], []
         for rep in range(N_REPS):
